@@ -13,9 +13,10 @@ from tqdm import tqdm
 import csv
 import timm
 import wandb
-
+import torch.nn.functional as F
 from PIL import Image
 import torchvision.transforms.v2 as transforms
+from ultralytics import YOLO
 
 # UTILITIES
 
@@ -35,7 +36,16 @@ def extract_frames(video_path, nb_frames=10, delta=1, timeit=False):
         print(f"read: {t2-t1}")
     return video
 
-def smart_resize(data, size): # kudos louis
+def smart_resize(data, target_size):
+    # Assumes data is a tensor of shape [..., C, H, W]
+    tr = transforms.Compose([
+        transforms.Resize(target_size),  # Resize the shortest side to target_size maintaining aspect ratio
+        transforms.CenterCrop(target_size)  # Crop the center to make it square
+    ])
+    return tr(data)
+
+
+def smart_resize_old(data, size): # kudos louis
     # Prends un tensor de shape [...,C,H,W] et le resize en [...C,size,size]
     # x, y, height et width servent a faire un crop avant de resize
 
@@ -92,6 +102,7 @@ nb_frames = 10
 
 ## MAKE RESIZED DATASET
 resized_dir = os.path.join(dataset_dir, "resized_dataset")
+
 """
 create_small_dataset = False
 errors = []
@@ -215,7 +226,7 @@ class VideoDataset(Dataset):
 
 train_dataset = VideoDataset(dataset_dir, dataset_choice="train", nb_frames=nb_frames)
 test_dataset = VideoDataset(dataset_dir, dataset_choice="test", nb_frames=nb_frames)
-experimental_dataset = VideoDataset(dataset_dir, dataset_choice="experimental", nb_frames=nb_frames)
+#experimental_dataset = VideoDataset(dataset_dir, dataset_choice="experimental", nb_frames=nb_frames)
 
 
 # MODELE
@@ -233,6 +244,7 @@ class DeepfakeDetector(nn.Module):
         y = self.sigmoid(y)
         return y
 
+
 # LOGGING
 
 wandb.login(key="a446d513570a79c857317c3000584c5f6d6224f0")
@@ -245,7 +257,13 @@ run = wandb.init(
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 batch_size = 32
-loss_fn = nn.MSELoss()
+# loss_fn = nn.MSELoss()
+
+class_weights = torch.tensor([0.5, 2.0], dtype=torch.float32)  # Assuming class 0 is more frequent
+weighted_loss = nn.CrossEntropyLoss(weight=class_weights)
+
+loss_fn = weighted_loss
+
 model = DeepfakeDetector().to(device)
 print("Training model:")
 summary(model, input_size=(batch_size, 3, 10, 256, 256))

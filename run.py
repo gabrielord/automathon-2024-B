@@ -13,10 +13,9 @@ from tqdm import tqdm
 import csv
 import timm
 import wandb
-import torch.nn.functional as F
+
 from PIL import Image
 import torchvision.transforms.v2 as transforms
-from ultralytics import YOLO
 
 # UTILITIES
 
@@ -36,16 +35,7 @@ def extract_frames(video_path, nb_frames=10, delta=1, timeit=False):
         print(f"read: {t2-t1}")
     return video
 
-def smart_resize(data, target_size):
-    # Assumes data is a tensor of shape [..., C, H, W]
-    tr = transforms.Compose([
-        transforms.Resize(target_size),  # Resize the shortest side to target_size maintaining aspect ratio
-        transforms.CenterCrop(target_size)  # Crop the center to make it square
-    ])
-    return tr(data)
-
-
-def smart_resize_old(data, size): # kudos louis
+def smart_resize(data, size): # kudos louis
     # Prends un tensor de shape [...,C,H,W] et le resize en [...C,size,size]
     # x, y, height et width servent a faire un crop avant de resize
 
@@ -102,7 +92,6 @@ nb_frames = 10
 
 ## MAKE RESIZED DATASET
 resized_dir = os.path.join(dataset_dir, "resized_dataset")
-
 """
 create_small_dataset = False
 errors = []
@@ -217,16 +206,16 @@ class VideoDataset(Dataset):
 
         ID = self.ids[self.video_files[idx]]
         if self.dataset_choice == "test":
-            return video, ID
+            return video[0], ID
         else:
             label = self.data[self.video_files[idx]]
-            return video, label, ID
+            return video[0], label, ID
 
 
 
 train_dataset = VideoDataset(dataset_dir, dataset_choice="train", nb_frames=nb_frames)
 test_dataset = VideoDataset(dataset_dir, dataset_choice="test", nb_frames=nb_frames)
-#experimental_dataset = VideoDataset(dataset_dir, dataset_choice="experimental", nb_frames=nb_frames)
+experimental_dataset = VideoDataset(dataset_dir, dataset_choice="experimental", nb_frames=nb_frames)
 
 
 # MODELE
@@ -244,10 +233,9 @@ class DeepfakeDetector(nn.Module):
         y = self.sigmoid(y)
         return y
 
-
 # LOGGING
 
-wandb.login(key="a446d513570a79c857317c3000584c5f6d6224f0")
+wandb.login(key="a44822b59479f0e86492890dd730fb6877a52748")
 
 run = wandb.init(
     project="automathon"
@@ -256,19 +244,17 @@ run = wandb.init(
 # ENTRAINEMENT
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-batch_size = 32
-# loss_fn = nn.MSELoss()
 
-class_weights = torch.tensor([0.5, 2.0], dtype=torch.float32)  # Assuming class 0 is more frequent
-weighted_loss = nn.CrossEntropyLoss(weight=class_weights)
+batch_size = 64
 
-loss_fn = weighted_loss
+loss_fn = nn.CrossEntropyLoss()
+# model = DeepfakeDetector().to(device)
+model = timm.create_model("resnet18", pretrained=True, num_classes=2)
 
-model = DeepfakeDetector().to(device)
 print("Training model:")
-summary(model, input_size=(batch_size, 3, 10, 256, 256))
+summary(model, input_size=(batch_size, 3, 256, 256))
 optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
-epochs = 5
+epochs = 10
 loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
 #loader = DataLoader(experimental_dataset, batch_size=2, shuffle=True)
 
@@ -280,8 +266,8 @@ for epoch in range(epochs):
         X = X.to(device)
         label = label.to(device)
         label_pred = model(X)
-        label = torch.unsqueeze(label,dim=1)
-        loss = loss_fn(label, label_pred)
+
+        loss = loss_fn(label_pred, label.long())
         loss.backward()
         optimizer.step()
         run.log({"loss": loss.item(), "epoch": epoch})
@@ -290,21 +276,19 @@ for epoch in range(epochs):
 
 loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 model = model.to(device)
+
 ids = []
 labels = []
 print("Testing...")
 for sample in tqdm(loader):
     X, ID = sample
-    #ID = ID[0]
     X = X.to(device)
     label_pred = model(X)
     ids.extend(list(ID))
-    pred = (label_pred > 0.5).long()
-    pred = pred.cpu().detach().numpy().tolist()
+    pred = label_pred.argmax(-1).cpu().detach().numpy().tolist()
     labels.extend(pred)
 
-### ENREGISTREMENT
 print("Saving...")
-tests = ["id,label\n"] + [f"{ID},{label_pred[0]}\n" for ID, label_pred in zip(ids, labels)]
+tests = ["id,label\n"] + [f"{ID},{label_pred}\n" for ID, label_pred in zip(ids, labels)]
 with open("submission.csv", "w") as file:
     file.writelines(tests)
